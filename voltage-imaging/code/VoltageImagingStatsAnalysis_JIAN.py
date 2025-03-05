@@ -3,11 +3,7 @@ import numpy as np
 import h5py
 import os
 
-import FitResponse
-import OSIndex
-import FittingUtils
-
-from VoltageTraceStats import (
+from Packages.SimpleNeuronAnalysis.NeuralActivities.VoltageTraceStats import (
     cnt_spike_in_time_stamp,
     calculate_spike_rate_s,
     stim_step_t_test,
@@ -16,7 +12,11 @@ from VoltageTraceStats import (
     calculate_subthd_responses,
     holm_bonferrioni_comparison,
 )
-
+from Packages.SimpleNeuronAnalysis.OrientationTuning.OTAnalysis import (
+    FitResponse,
+    OSIndex,
+    FittingUtils,
+)
 
 
 def voltage_imaging_stats_analyis(
@@ -113,4 +113,3 @@ if __name__ == "__main__":
     if t_test_pass and anova_test_pass:
         print(f"Suprathreshold OSI = {fr_OSI:0.2f}")
         print(f"Subthreshold OSI = {subthd_OSI:0.2f}")
-
