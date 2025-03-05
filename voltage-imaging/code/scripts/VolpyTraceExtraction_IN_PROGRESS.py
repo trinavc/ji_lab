@@ -1,4 +1,4 @@
-# Complete Revised VolPy Data Processing Script with Dynamic Array Reshaping and Logging
+# Complete Revised VolPy Data Processing Script
 import sys
 import cv2
 import logging
@@ -6,10 +6,12 @@ import os
 import glob
 import h5py
 import numpy as np
-import scipy.io
 import caiman as cm
-from volparams import volparams
-from volpy import VOLPY
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'voltage-processing')))
+                                             
+from caiman.source_extraction.volpy.volparams import volparams
+from caiman.source_extraction.volpy.volpy import VOLPY
 from VoltageTraceOps import verifySpikeSTD
 from tifffile import TiffFile
 
@@ -32,41 +34,94 @@ def save_to_hdf5(h5file, data_dict):
     for key, value in data_dict.items():
         if isinstance(value, np.ndarray):
             h5file.create_dataset(key, data=value)
-        else:
+        elif isinstance(value, (int, float, str)):
             h5file.attrs[key] = value
-            
-def reshape_data(data, target_shape):
-    logging.info(f"Reshaping data from shape {data.shape} to {target_shape}")
-    data = np.array(data)
-    padded_data = np.zeros(target_shape)
-    padded_data.flat[:data.size] = data.flat[:]
-    return padded_data if data.size < np.prod(target_shape) else data.reshape(target_shape)
+        elif isinstance(value, dict): # Save nested dictionaries
+            group = h5file.create_group(key)
+            save_to_hdf5(group, value)
+        else:
+            h5file.attrs[key] = str(value) # Convert to string if other type
+            logging.warning(f"Could not save {key} as a dataset, saving as attribute string")
 
-def volpy_trace_extraction(srcDataFilePath, srcROIFilePath, opts_dict, detrend_winsize, spike_winsize, threshold, savePath=None):
+def volpy_trace_extraction(srcDataFilePath, srcROIFilePath, opts_dict, roi_idx, detrend_winsize, spike_winsize, threshold, savePath=None, threshold_method = 'adaptive_threshold'):
     logging.info("Starting VolPy trace extraction")
-    nof_frames, nof_trials, orient_angles_rad, stim_tstamp, stim_tstamp_s = extract_metadata_from_tif(srcDataFilePath)
+
     srcROIs = cm.load(srcROIFilePath)
-    _, dview, _ = cm.cluster.setup_cluster(backend='local')
+    if(len(srcROIs.shape) < 3):
+        srcROIs = srcROIs.reshape((1,) + srcROIs.shape)
+    srcROIs = (srcROIs > 0)
+
+    _, dview, n_processes = cm.cluster.setup_cluster(backend='local', n_processes=None, single_thread=False)
+
     srcMvMmpFName = cm.save_memmap([srcDataFilePath], base_name='memmap_', dview=dview, order='C')
 
-    results = {'nof_frames': nof_frames, 'nof_roi': len(srcROIs), 'nof_trials': nof_trials, 'orient_angles_rad': orient_angles_rad, 'stim_tstamp': stim_tstamp, 'stim_tstamp_s': stim_tstamp_s}
-    vpy = VOLPY(srcMvMmpFName, srcROIs, opts_dict, dview)
+    ROIs = srcROIs
+    srcROIs2 = srcROIs[0: 5]
+    index = list(range(len(ROIs)))
 
-    target_shape = (nof_trials, nof_frames)
-    for i, roi in enumerate(srcROIs):
-        logging.info(f"Processing ROI {i+1}/{len(srcROIs)}")
-        dFF = reshape_data(vpy.estimates['dFF'][i], target_shape)
-        spikes = reshape_data(vpy.estimates['spikes'][i], target_shape)
+    opts_dict["fnames"] = srcMvMmpFName
+    opts_dict["ROIs"] = ROIs
+    opts_dict["index"] = index
+
+    opts = volparams(params_dict=opts_dict)
+    opts.change_params(params_dict=opts_dict)
+
+    vpy = VOLPY(n_processes=n_processes, dview=dview, params=opts)
+    vpy.fit(n_processes=n_processes, dview=dview)
+
+    results = {}
+
+    for i, roi in enumerate(srcROIs2):
+        logging.info(f"Processing ROI {i+1}/{len(srcROIs2)}")
+        dFF = vpy.estimates['dFF'][i]
+        spikes = vpy.estimates['spikes'][i]
+
         spikes_valid, spikes_invalid = verifySpikeSTD(dFF, spikes, detrend_winsize, spike_winsize, threshold)
         results[f'roi{i}/cur_spike_event'] = spikes_valid
         results[f'roi{i}/cur_subthreshold_dFF'] = dFF
 
+    results['opts'] = opts_dict
+    results['vpy_estimates'] = vpy.estimates
+    results['ROIs'] = ROIs
+
     if savePath:
-        with h5py.File(os.path.join(savePath, 'output_data.hdf5'), 'w') as f:
+        save_name = f'volpy{os.path.split(srcMvMmpFName)[1][:-5]}_{threshold_method}.hdf5'
+        with h5py.File(os.path.join(savePath, save_name), 'w') as f:
             save_to_hdf5(f, results)
+
     logging.info("VolPy trace extraction completed successfully")
-    cm.stop_cluster(dview=dview)
+    cm.stop_server(dview=dview)
+    log_files = glob.glob('*_LOG_*')
+    for log_file in log_files:
+        os.remove(log_file)
+
     return results
 
 if __name__ == "__main__":
-    volpy_trace_extraction("/Users/trinav/personal/research/voltage-imaging/data/Combined.tif", "/Users/trinav/personal/research/voltage-imaging/data/Masks.tif", {'fr': 1000/1.71}, 150, 30, 2.0, savePath="path/to/save/output")
+    opts_dict = {'fr': 1000/1.7}
+    roi_idx = 0
+    detrend_winsize = 100
+    spike_winsize = 20
+    threshold = 2.5
+
+    filePath = r"/Users/trinav/personal/ji_lab/voltage-imaging/data"
+
+    srcDataFilePath = os.path.join(filePath, 'Combined.tif')
+    srcROIFilePath = os.path.join(filePath, "Masks.tif")
+
+    logging.info(f"Processing data from {srcDataFilePath} and {srcROIFilePath}")
+
+    volpy_trace_extraction(srcDataFilePath, srcROIFilePath, opts_dict, roi_idx, detrend_winsize, spike_winsize, threshold, savePath=filePath)
+
+    logging.info("Processing complete.")
+
+##    headpath = r"/home/jilab/anna_FACED_data/"
+##    filePathArray = [r"AY124/FOV1", r"AY124/FOV2", r"AY124/FOV3", r"AY124/FOV4", r"AY124/FOV5", r"AY125/FOV1", r"AY125/FOV2"]
+##    for n in list(range(len(filePathArray))):
+##        filePath = os.path.join(headpath, filePathArray[n])
+##        print(filePath)
+##       srcDataFilePath = os.path.join(filePath, 'Combined.tif')
+##        srcROIFilePath = os.path.join(filePath, "Masks.tif")
+##        volpy_trace_extraction(srcDataFilePath, srcROIFilePath, opts_dict, roi_idx, detrend_winsize, spike_winsize, threshold, savePath=filePath)
+##        print("Next Processing: ") 
+    print("Finished...")
