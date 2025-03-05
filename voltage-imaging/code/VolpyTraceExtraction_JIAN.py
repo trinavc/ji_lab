@@ -4,19 +4,13 @@
 import sys
 import cv2
 import logging
-import h5py
-import numpy as np
-from scipy import stats
-import scipy.io as sio
-from pathlib import Path
-import os
 
 import caiman as cm
-from volparams import volparams
-from volpy import VOLPY
+from caiman.source_extraction.volpy.volparams import volparams
+from caiman.source_extraction.volpy.volpy import VOLPY
 
 
-from VoltageTraceOps import (
+from Packages.SimpleNeuronAnalysis.NeuralActivities.VoltageTraceOps import (
     verifySpikeSTD,
 )
 
@@ -73,137 +67,56 @@ def volpy_trace_extraction(
     vpy.fit(n_processes=n_processes, dview=dview) 
 
     dFF = vpy.estimates['dFF'][roi_idx]
+    vpy.estimates['ROIs'] = ROIs
     spikes_valid, _ = verifySpikeSTD(
         vpy.estimates['dFF'][roi_idx],  
         vpy.estimates['spikes'][roi_idx], 
         detrend_winsize, 
         spike_winsize, 
         threadshold, )
-    
+
+    save_name = f'volpy{os.path.split(srcMvMmpFName)[1][:-5]}_{threshold_method}.hdf5'
+    with h5py.File(os.path.join(savePath, save_name), 'w') as hf:
+        recursively_save_dict_contents_to_group(hf, 'estimates' vpy.estimates)
+        recursively_save_dict_contents_to_group(hf, 'opts' vpy.params)
+    with h5py.File(os.path.join(savePath, save_name), 'w') as hf:
+        hf.create_dataset('estimates', data=vpy.estimates)
+        hf.create_dataset('opts', data = vpy.params)
+
+    cm.stop_server(dview = dview)
+    log_files = glob.glob('*_LOG_*')
+    for log_file in log_files:
+        os.remove(log_file)
+        
+
     return (dFF, spikes_valid)
 
-def calculate_osi(responses):
-    """Calculate orientation selectivity index"""
-    # Assuming responses is array of responses for different orientations
-    sum_resp = np.sum(responses * np.exp(2j * np.pi * np.arange(len(responses)) / len(responses)))
-    return np.abs(sum_resp) / np.sum(responses)
 
-def analyze_roi_data(dFF, spikes, subthreshold):
-    """Calculate statistics for a single ROI"""
-    # T-test: comparing response periods to baseline
-    t_stat, t_pval = stats.ttest_1samp(dFF, 0)
-    
-    # ANOVA: comparing responses across different conditions
-    f_stat, f_pval = stats.f_oneway(*[group for group in np.array_split(dFF, 8)])  # Assuming 8 conditions
-    
-    # Calculate OSIs
-    fr_osi = calculate_osi(spikes)  # Firing rate OSI
-    sub_osi = calculate_osi(subthreshold)  # Subthreshold OSI
-    
-    return {
-        't_test': {'statistic': t_stat, 'pvalue': t_pval},
-        'anova': {'statistic': f_stat, 'pvalue': f_pval},
-        'fr_OSI': fr_osi,
-        'subthreshold_OSI': sub_osi
-    }
-
-def process_hdf5_file(input_path, output_path):
-    """Process HDF5 file and save results as .mat"""
-    print(f"\nProcessing file: {input_path}")
-    
-    # Load HDF5 file
-    with h5py.File(input_path, 'r') as f:
-        print("Successfully opened HDF5 file")
-        
-        # Extract data for all ROIs
-        results = {
-            'spike_events': [],
-            'subthreshold_dFF': [],
-            't_test_stats': [],
-            't_test_pvals': [],
-            'anova_stats': [],
-            'anova_pvals': [],
-            'fr_OSI': [],
-            'subthreshold_OSI': []
-        }
-        
-        # Get number of ROIs
-        n_rois = len(f['estimates/dFF'])
-        print(f"Found {n_rois} ROIs to process")
-        
-        # Process each ROI
-        for roi_idx in range(n_rois):
-            print(f"\nProcessing ROI {roi_idx + 1}/{n_rois}")
-            
-            # Get data for this ROI
-            print("  Loading ROI data...")
-            dFF = f['estimates/dFF'][roi_idx]
-            spikes = f['estimates/spikes'][roi_idx]
-            subthreshold = f['selected_roi/t_sub'][roi_idx] if 'selected_roi/t_sub' in f else None
-            
-            # Calculate statistics
-            print("  Calculating statistics...")
-            stats_results = analyze_roi_data(dFF, spikes, subthreshold)
-            
-            # Store results
-            print("  Storing results...")
-            results['spike_events'].append(spikes)
-            results['subthreshold_dFF'].append(subthreshold)
-            results['t_test_stats'].append(stats_results['t_test']['statistic'])
-            results['t_test_pvals'].append(stats_results['t_test']['pvalue'])
-            results['anova_stats'].append(stats_results['anova']['statistic'])
-            results['anova_pvals'].append(stats_results['anova']['pvalue'])
-            results['fr_OSI'].append(stats_results['fr_OSI'])
-            results['subthreshold_OSI'].append(stats_results['subthreshold_OSI'])
-            print(f"  ROI {roi_idx + 1} complete")
-    
-    # Convert lists to numpy arrays
-    print("\nConverting results to numpy arrays...")
-    for key in results:
-        results[key] = np.array(results[key])
-    
-    # Save as .mat file
-    print(f"Saving results to: {output_path}")
-    sio.savemat(output_path, results)
-    print("Processing complete!")
-
+# run this script as demo script
 if __name__ == "__main__":
-    print("Starting statistical analysis...")
-    
-    # Set paths
-    input_dir = "/Users/trinav/personal/research/voltage-imaging/data/outputs/step2"
-    output_dir = "/Users/trinav/personal/research/voltage-imaging/data/outputs/step3"
-    
-    print(f"\nInput directory: {input_dir}")
-    print(f"Output directory: {output_dir}")
-    
-    # Create output directory if it doesn't exist
-    print("Creating output directory...")
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Find all HDF5 files
-    print("Looking for HDF5 files...")
-    hdf5_files = list(Path(input_dir).glob('*.h5'))
-    
-    if not hdf5_files:
-        print(f"Error: No HDF5 files found in {input_dir}")
-        sys.exit(1)
-    
-    print(f"Found {len(hdf5_files)} HDF5 files to process")
-    
-    # Process each file
-    for i, input_file in enumerate(hdf5_files, 1):
-        print(f"\nProcessing file {i}/{len(hdf5_files)}: {input_file.name}")
-        output_file = Path(output_dir) / f"{input_file.stem}_stats.mat"
-        
-        try:
-            process_hdf5_file(str(input_file), str(output_file))
-            print(f"Successfully processed {input_file.name}")
-        except Exception as e:
-            print(f"Error processing {input_file.name}: {e}")
-            continue
-    
-    print("\nAll processing complete!")
+    print()
+    print("Usage:")
+    print(r" * Set srcDataFilePath as the file path of the motion registered image sequence")
+    print(r" * Set srcROIFilePath as the file path of the ROI stack (ROIs need to be saved as mask images)")
+    print(r"NOTE: Please check the following VolPy notebook on how to use VolPy:")
+    print(r"URL: https://github.com/flatironinstitute/CaImAn/blob/main/demos/notebooks/demo_pipeline_voltage_imaging.ipynb")
+    print('Processing...')
+    opts_dict = {'fr':1000/1.7}
+    roi_idx = 0
+    detrend_winsize = 100
+    spike_winsize = 20
+    threadshold = 2.5
+
+    headpath = r"/home/jilab/anna_FACED_data/"
+    filepathArray = [r"AY124/FOV1", r"AY124/FOV2", r"AY124/FOV3", r"AY124/FOV4", r"AY124/FOV5", r"AY125/FOV1", f"AY125/FOV2"]
+    for n in list(range(len(filePathArray))):
+        filePath = os.path.join(headpath, filePathArray[n])
+        print(filePath)
+        srcDataFilePath = os.path.join(filePath, 'Combined.tif')
+        srcROIFilePath = os.path.join(filePath, "Masks.tif")
+        volpy_trace_extraction(filePath, srcDataFilePath, srcROIFilePath, opts_dict, roi_idx, detrend_winsize, spike_winsize, threadshold)
+        print("Next Processing: ")
+    print("Finished...")
 
 
                                
