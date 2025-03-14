@@ -182,15 +182,28 @@ def volspike(pars):
     output = {}
     output['rawROI'] = {}
     print(f'Now processing cell number {cell_n}')
-    
-    # load the movie in C-order memory mapping file
-    Yr, dims, T = cm.load_memmap(fnames)
+    print(f"📂 Attempting to load memmap file: {fnames}")  # Debugging before loading memmap
+
+    try:
+        Yr, dims, T = cm.load_memmap(fnames)
+        print(f"✅ Memmap loaded. Yr.shape: {Yr.shape if Yr is not None else 'None'}, dims: {dims}, T: {T}")
+    except Exception as e:
+        print(f"❌ ERROR: Failed to load memory map: {e}")
+        raise  # Re-raise the exception to see the full traceback
+
+    logging.info(f"✅ Memmap loaded successfully")  
     if bw.shape == dims:
         images = np.reshape(Yr.T, [T] + list(dims), order='F')
     else:
         raise Exception('Dimensions of movie and ROIs do not accord')
         
-    # extract the context region from the entire movie
+    logging.info(f"⚡ bw.shape = {bw.shape}, type = {type(bw)}")
+
+    kernel = np.ones((args['context_size'], args['context_size']), dtype=bool)
+    logging.info(f"⚡ Dilation kernel shape: {kernel.shape}, type: {type(kernel)}")
+
+
+# Apply dilation with adjusted context_size
     bwexp = dilation(bw, np.ones([args['context_size'], args['context_size']]), shift_x=True, shift_y=True)
     Xinds = np.where(np.any(bwexp > 0, axis=1) > 0)[0]
     Yinds = np.where(np.any(bwexp > 0, axis=0) > 0)[0]
