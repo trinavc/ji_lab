@@ -13,9 +13,31 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'v
 from caiman.source_extraction.volpy.volparams import volparams
 from caiman.source_extraction.volpy.volpy import VOLPY
 from VoltageTraceOps import verifySpikeSTD
-from tifffile import TiffFile
+import tifffile
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def load_tif_stack(tif_path):
+    """ Manually load the multi-frame TIFF file to ensure VolPy reads all frames correctly. """
+    logging.info(f"Loading TIFF file: {tif_path}")
+    
+    # Read the TIFF stack
+    tif_stack = tifffile.imread(tif_path)  # Expected shape: (frames, height, width)
+
+    if len(tif_stack.shape) == 2:
+        logging.warning("TIFF appears to be a single frame. Converting to multi-frame artificially.")
+        tif_stack = np.expand_dims(tif_stack, axis=0)  # Add frame dimension
+
+    logging.info(f"✅ TIFF Loaded: {tif_stack.shape}")  # Should be (T, H, W)
+    
+    # Convert to CaImAn format
+    srcROIs = np.array(tif_stack, dtype=np.float32)  # Ensure dtype is correct
+    if len(srcROIs.shape) == 3:
+        srcROIs = srcROIs[:, np.newaxis, :, :]  # Reshape to (T, 1, H, W) for CaImAn
+
+    logging.info(f"✅ Reshaped for CaImAn: {srcROIs.shape}")
+    return srcROIs
+
 
 def extract_metadata_from_tif(tif_path):
     logging.info(f"Extracting metadata from {tif_path}")
@@ -46,33 +68,48 @@ def save_to_hdf5(h5file, data_dict):
 def volpy_trace_extraction(srcDataFilePath, srcROIFilePath, opts_dict, roi_idx, detrend_winsize, spike_winsize, threshold, savePath=None, threshold_method = 'adaptive_threshold'):
     logging.info("Starting VolPy trace extraction")
 
-    srcROIs = cm.load(srcROIFilePath)
-    if(len(srcROIs.shape) < 3):
+    srcROIs = load_tif_stack(srcROIFilePath)
+    if len(srcROIs.shape) < 3:
         srcROIs = srcROIs.reshape((1,) + srcROIs.shape)
     srcROIs = (srcROIs > 0)
 
-    _, dview, n_processes = cm.cluster.setup_cluster(backend='local', n_processes=None, single_thread=False)
+    imaging_data = load_tif_stack(srcDataFilePath)
+    if len(imaging_data.shape) < 3:
+        imaging_data = imaging_data.reshape((1,) + imaging_data.shape)
 
-    srcMvMmpFName = cm.save_memmap([srcDataFilePath], base_name='memmap_', dview=dview, order='C')
+    _, dview, n_processes = cm.cluster.setup_cluster(backend='local', n_processes=1, single_thread=True)
 
-    ROIs = srcROIs
-    srcROIs2 = srcROIs[0: 5]
-    index = list(range(len(ROIs)))
+    srcMvMmpFName = cm.save_memmap([imaging_data[:5000]], base_name='memmap_', dview=dview, order='C')
 
+    #ROIs = srcROIs
+    #index = list(range(len(ROIs)))
+
+    N = 2  # Change this number to select how many ROIs to process
+    ROIs = srcROIs[:N]  # Select only the first N ROIs
+    index = list(range(len(ROIs)))  # Update index list accordingly
+    
     opts_dict["fnames"] = srcMvMmpFName
     opts_dict["ROIs"] = ROIs
     opts_dict["index"] = index
 
     opts = volparams(params_dict=opts_dict)
     opts.change_params(params_dict=opts_dict)
+    # Ensure VolPy has a valid context_size
+    logging.info(f"🔍 Checking VolPy default parameters: context_size = {opts.volspike.get('context_size', 'Not Defined')}")
+
+    if np.sum(ROIs) == 0:
+        raise ValueError("❌ Error: ROI mask is empty! Check Masks.tif.")
+    logging.info(f"✅ ROI mask sum: {np.sum(ROIs)} (should be > 0)")
+
+
 
     vpy = VOLPY(n_processes=n_processes, dview=dview, params=opts)
     vpy.fit(n_processes=n_processes, dview=dview)
 
     results = {}
 
-    for i, roi in enumerate(srcROIs2):
-        logging.info(f"Processing ROI {i+1}/{len(srcROIs2)}")
+    for i, roi in enumerate(ROIs):
+        logging.info(f"Processing ROI {i+1}/{len(ROIs)}")
         dFF = vpy.estimates['dFF'][i]
         spikes = vpy.estimates['spikes'][i]
 
