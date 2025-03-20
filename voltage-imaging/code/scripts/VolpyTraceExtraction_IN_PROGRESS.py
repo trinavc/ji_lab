@@ -9,9 +9,11 @@ import numpy as np
 import caiman as cm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'voltage-processing')))
-                                             
+
+
 from caiman.source_extraction.volpy.volparams import volparams
-from caiman.source_extraction.volpy.volpy import VOLPY
+#from caiman.source_extraction.volpy.volpy import VOLPY
+import volpy as VP
 from VoltageTraceOps import verifySpikeSTD
 import tifffile
 
@@ -103,7 +105,7 @@ def volpy_trace_extraction(srcDataFilePath, srcROIFilePath, opts_dict, roi_idx, 
 
 
 
-    vpy = VOLPY(n_processes=n_processes, dview=dview, params=opts)
+    vpy = VP.__init__(n_processes=n_processes, dview=dview, params=opts)
     vpy.fit(n_processes=n_processes, dview=dview)
 
     results = {}
